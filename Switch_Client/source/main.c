@@ -9,254 +9,247 @@
 #include <errno.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <time.h>
 
 #define PORT 8192
-#define CPU_CLOCK 50E6 //50 MHz should be a BIG improvement in battery life if the console is used in handheld mode
+#define CPU_CLOCK 204E6 //204MHz is the sweet spot between latency and battery life, still can be overriden by using sys-clk
 
 char ipAddress[16];
 u8 data[5];
-JoystickPosition joystickLeft, joystickRight;
+PadState pad;
 
 void * get_in_addr(struct sockaddr *sa) {
-  if (sa->sa_family == AF_INET) {
-    return &(((struct sockaddr_in*)sa)->sin_addr);
-  }
-
-  return &(((struct sockaddr_in6*)sa)->sin6_addr);
+    if (sa->sa_family == AF_INET) {
+        return &(((struct sockaddr_in*)sa)->sin_addr);
+    }
+    return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
 int broadcast(int sck, char * host, char * port) {
-  uint8_t msg[] = "xbox_switch";
-  char buffer[128] = {0};
-  struct hostent * he;
-  struct sockaddr_in remote;
-  struct sockaddr_storage from;
-  socklen_t from_len = sizeof(from);
+    uint8_t msg[] = "xbox_switch";
+    char buffer[128] = {0};
+    struct hostent * he;
+    struct sockaddr_in remote;
+    struct sockaddr_storage from;
+    socklen_t from_len = sizeof(from);
 
-  if ((he = gethostbyname(host)) == NULL) {
-    return -1;
-  }
-
-  remote.sin_family = AF_INET;
-  remote.sin_port = htons(atoi(port));
-  remote.sin_addr = *(struct in_addr *)he->h_addr;
-  memset(remote.sin_zero, 0, sizeof(remote.sin_zero));
-
-  int on=1;
-  setsockopt(sck, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
-
-  struct timeval tv;
-  tv.tv_sec = 0;
-  tv.tv_usec = 1000000;
-  setsockopt(sck, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv));
-
-  while(1) {
-    while (1) {
-      sendto(sck, msg, sizeof(msg), 0, (struct sockaddr *)&remote, sizeof(remote));
-      recvfrom(sck, buffer, sizeof(buffer), 0, (struct sockaddr *)&from, &from_len);
-
-      if (strlen(buffer) > 0) break;
+    if ((he = gethostbyname(host)) == NULL) {
+        printf("\nERROR: gethostbyname failed - is a connection active?\n");
+        consoleUpdate(NULL);
+        svcSleepThread(2000000000);
+        return -1;
     }
 
-    char addr[40] = {0};
+    remote.sin_family = AF_INET;
+    remote.sin_port = htons(atoi(port));
+    remote.sin_addr = *(struct in_addr *)he->h_addr;
+    memset(remote.sin_zero, 0, sizeof(remote.sin_zero));
 
-    const char * ptr = inet_ntop(from.ss_family, get_in_addr((struct sockaddr *)&from), addr, sizeof(addr));
+    int on=1;
+    setsockopt(sck, SOL_SOCKET, SO_BROADCAST, &on, sizeof(on));
 
-    if (strcmp("xbox", buffer) == 0) {
-      strcpy(ipAddress, ptr);
-      break;
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 100000; 
+    setsockopt(sck, SOL_SOCKET, SO_RCVTIMEO,&tv,sizeof(tv));
+
+    printf("\x1b[12;1HSending broadcast to %s...", host);
+    printf("\x1b[13;1HWaiting for 'xbox' reply...");
+    printf("\x1b[14;1HPress B to Cancel.");
+    consoleUpdate(NULL);
+
+    time_t start_time = time(NULL); 
+    int timeout_seconds = 15;
+
+    while(1) {    
+        //1. Check Timeout
+        if (difftime(time(NULL), start_time) >= timeout_seconds) {
+            printf("\x1b[15;1HConnection timed out.");
+            consoleUpdate(NULL);
+            svcSleepThread(2000000000); 
+            return -1; 
+        }
+
+        //2. Check Cancellation
+        padUpdate(&pad);
+        u64 kDown = padGetButtonsDown(&pad);
+        if (kDown & HidNpadButton_B) {
+            return -1;
+        }
+
+        //3. Send&Receive
+        sendto(sck, msg, sizeof(msg), 0, (struct sockaddr *)&remote, sizeof(remote));
+        
+        memset(buffer, 0, sizeof(buffer));
+        int len = recvfrom(sck, buffer, sizeof(buffer)-1, 0, (struct sockaddr *)&from, &from_len);
+
+        if (len > 0) {
+            buffer[len] = '\0';
+            if (strcmp("xbox", buffer) == 0) {
+                char addr[40] = {0};
+                const char * ptr = inet_ntop(from.ss_family, get_in_addr((struct sockaddr *)&from), addr, sizeof(addr));
+                strcpy(ipAddress, ptr);
+                return 0; 
+            }
+        }
+        
     }
-  }
+}
 
-  return 0;
+void updateButtonState(int s, struct sockaddr_in *si_other, int slen, u64 kHeld, u64 kDown, u64 kUp, u64 mask, const char* id_code) {
+    if ((kDown & mask) || (kUp & mask)) {
+        char packet[2];
+        packet[0] = id_code[0]; 
+        packet[1] = (kHeld & mask) ? 1 : 0; 
+        sendto(s, packet, 2, 0, (struct sockaddr *) si_other, slen);
+    }
 }
 
 int main(int argc, char* argv[]) {
     u8 currentIpBlock = 0;
     u8 ipBlocks [4] = {192, 168 , 1, 255};
+    int s = -1; 
 
     socketInitializeDefault();
     consoleInit(NULL);
 
-    printf("|------------------------|\n");
-    printf("| Switch XBOX Controller |\n");
-    printf("|------------------------|\n\n");
+    padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+    padInitializeDefault(&pad);
 
-    printf("Please set up the IP where the UDP broadcast should be send to!\n");
-    printf("Usually this address is 192.168.X.255 where X is the 3. block of your local IP.\n");
-	printf("If UDP broadcasting does not work for you, use the IP of your computer instead.\n");
-	printf("Use the DPAD to enter the IP address bellow and press the A button to connect.\n");
-	printf("ZL/ZR can be used to decrement/increment the IP by 10.\n");
+    appletSetScreenShotPermission(0);
 
-	consoleUpdate(NULL);
-	
-  //Underclock the CPU
-  if (hosversionBefore(8, 0, 0)) {
-    pcvInitialize();
-	pcvSetClockRate(PcvModule_CpuBus, CPU_CLOCK); 
-  }
-  else {
-    ClkrstSession clkrstSession;
-    clkrstInitialize();
-    clkrstOpenSession(&clkrstSession, PcvModuleId_CpuBus, 3);
-    clkrstSetClockRate(&clkrstSession, CPU_CLOCK);
-	clkrstCloseSession(&clkrstSession);
-  }
-	appletSetScreenShotPermission(0); //Disable the screenshot function because it is not needed for the program
+    //Main connection loop 
+    while(appletMainLoop()) {
+        consoleClear();
+        consoleUpdate(NULL); 
 
-    while (1)
-    {
-        hidScanInput();
-        u64 kDown = hidKeysDown(CONTROLLER_P1_AUTO);
+        if (hosversionBefore(8, 0, 0)) {
+          pcvInitialize();
+          pcvSetClockRate(PcvModule_CpuBus, CPU_CLOCK); 
+        } else {
+          ClkrstSession clkrstSession;
+          clkrstInitialize();
+          clkrstOpenSession(&clkrstSession, PcvModuleId_CpuBus, 3);
+          clkrstSetClockRate(&clkrstSession, CPU_CLOCK);
+          clkrstCloseSession(&clkrstSession);
+        }
+        printf("\x1b[12;1H");
+        printf("   \x1b[K");
+        printf("\x1b[13;1H");
+        printf("   \x1b[K");
+        printf("\x1b[14;1H");
+        printf("   \x1b[K");
+        printf("\x1b[15;1H");
+        printf("   \x1b[K");
+        printf("\x1b[1;1H|----------------------------------------------------|");
+        printf("\x1b[2;1H|    NXInput - libnx 4.10/ViGEmBus fork by Vins98    |");
+        printf("\x1b[3;1H|----------------------------------------------------|");
 
-		if (currentIpBlock == 0) printf("\x1b[11;1HCurrent IP Adress: [%d].%d.%d.%d\t\t\n", ipBlocks[0], ipBlocks[1], ipBlocks[2], ipBlocks[3]);
-		if (currentIpBlock == 1) printf("\x1b[11;1HCurrent IP Adress: %d.[%d].%d.%d\t\t\n", ipBlocks[0], ipBlocks[1], ipBlocks[2], ipBlocks[3]);
-		if (currentIpBlock == 2) printf("\x1b[11;1HCurrent IP Adress: %d.%d.[%d].%d\t\t\n", ipBlocks[0], ipBlocks[1], ipBlocks[2], ipBlocks[3]);
-		if (currentIpBlock == 3) printf("\x1b[11;1HCurrent IP Adress: %d.%d.%d.[%d]\t\t\n", ipBlocks[0], ipBlocks[1], ipBlocks[2], ipBlocks[3]);
+        printf("\x1b[5;1HPlease set up the IP address where the UDP socket should be opened!");
+        printf("\x1b[6;1HIt is advisable to use your PC's local IP, as most routers block broadcast packets,");
+        printf("\x1b[7;1H except DHCP, ARP, NDP or WoL. Make sure to run the NXInput server first!");
+        printf("\x1b[8;1HUse DPAD to enter the IP address below and press the A button to connect.");
+        printf("\x1b[9;1HZL/ZR can be used to decrement/increment the IP by 10.");
 
-		//Handle inputs
-		if (kDown & KEY_DUP) ipBlocks[currentIpBlock]++;
-		if (kDown & KEY_DDOWN) ipBlocks[currentIpBlock]--;
+        //IP Selection UI
+        while (appletMainLoop()) {
+            padUpdate(&pad);
+            u64 kDown = padGetButtonsDown(&pad);
 
-		if (kDown & KEY_ZR) ipBlocks[currentIpBlock]+=10;
-		if (kDown & KEY_ZL) ipBlocks[currentIpBlock]-=10;
+            printf("\x1b[11;1HIP Address: ");
+            for(int i=0; i<4; i++) {
+                if(i == currentIpBlock) printf("[%d]", ipBlocks[i]);
+                else printf("%d", ipBlocks[i]);
+                if(i < 3) printf(".");
+            }
+            printf("   \x1b[K"); 
 
-		if (kDown & KEY_DRIGHT && currentIpBlock < 3) currentIpBlock++;
-		if (kDown & KEY_DLEFT && currentIpBlock > 0) currentIpBlock--;
+            if (kDown & HidNpadButton_Up) ipBlocks[currentIpBlock]++;
+            if (kDown & HidNpadButton_Down) ipBlocks[currentIpBlock]--;
+            if (kDown & HidNpadButton_ZR) ipBlocks[currentIpBlock]+=10;
+            if (kDown & HidNpadButton_ZL) ipBlocks[currentIpBlock]-=10;
+            if (kDown & HidNpadButton_Right && currentIpBlock < 3) currentIpBlock++;
+            if (kDown & HidNpadButton_Left && currentIpBlock > 0) currentIpBlock--;
+            
+            if (kDown & HidNpadButton_A) break;
 
-        if (kDown & KEY_A) break;
+            consoleUpdate(NULL);
+        }
 
-		consoleUpdate(NULL);
+        // Prepare for broadcast
+        char computersIp[16];
+        sprintf(computersIp, "%d.%d.%d.%d", ipBlocks[0], ipBlocks[1], ipBlocks[2], ipBlocks[3]);
 
-		svcSleepThread(10E6);
+        if ((s = socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
+            printf("\x1b[13;1HSocket failed: %d. Retrying...", errno);
+            consoleUpdate(NULL);
+            svcSleepThread(1000000000);
+            continue;
+        }
+
+        if (broadcast(s, computersIp, "8192") == 0) {
+            break; // Connection successful!
+        } else {
+            close(s); 
+        }
     }
+
+    printf("\x1b[13;1HConnected to: %s", ipAddress);
+    printf("\x1b[14;1Press + and - to Exit.");
+    printf("\x1b[15;1H");
+    printf("   \x1b[K");
     
-    char computersIp[16];
-    sprintf(computersIp, "%d.%d.%d.%d",ipBlocks[0], ipBlocks[1], ipBlocks[2], ipBlocks[3]);
+    consoleUpdate(NULL);
 
     struct sockaddr_in si_other;
-    int s, slen=sizeof(si_other);
-
-    if ((s=socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
-        printf("Socket creation failed: %d\n", s);
-    }
-
-    broadcast(s, computersIp, "8192");
-
-    printf("Connected to: %s\n", ipAddress);
-
+    int slen = sizeof(si_other);
     memset((char *) &si_other, 0, sizeof(si_other));
     si_other.sin_family = AF_INET;
     si_other.sin_port = htons(PORT);
-
-    if (inet_aton(ipAddress , &si_other.sin_addr) == 0) {
-        fprintf(stderr, "inet_aton() failed\n");
-    }
-
+    inet_aton(ipAddress, &si_other.sin_addr);
+    
     while (appletMainLoop()) {
-        hidScanInput();
-        u64 kHeld = hidKeysHeld(CONTROLLER_P1_AUTO);
+        padUpdate(&pad);
+        u64 kHeld = padGetButtons(&pad);
+        u64 kDown = padGetButtonsDown(&pad);
+        u64 kUp = padGetButtonsUp(&pad);
 
-        hidJoystickRead(&joystickLeft, CONTROLLER_P1_AUTO, JOYSTICK_LEFT);
-        hidJoystickRead(&joystickRight, CONTROLLER_P1_AUTO, JOYSTICK_RIGHT);
+        if ((kHeld & HidNpadButton_Plus) && (kHeld & HidNpadButton_Minus)) break;
 
-        //DPAD Up
-        if (kHeld & KEY_DUP) sendto(s, "\x1\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x1\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Up, "\x1");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Down, "\x2");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Left, "\x3");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Right, "\x4");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Minus, "\x5");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Plus, "\x6");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_StickL, "\x7");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_StickR, "\x8");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_L, "\x9");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_R, "\xA");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_A, "\xC");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_B, "\xD");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_X, "\xE");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Y, "\xF");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_ZL, "\x10");
+        updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_ZR, "\x11");
 
-        //DPAD Down
-        if (kHeld & KEY_DDOWN) sendto(s, "\x2\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x2\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //DPAD Left
-        if (kHeld & KEY_DLEFT) sendto(s, "\x3\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x3\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //DPAD Right
-        if (kHeld & KEY_DRIGHT) sendto(s, "\x4\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-            else sendto(s, "\x4\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        //Minus button
-        if (kHeld & KEY_MINUS) sendto(s, "\x5\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x5\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //Plus button
-        if (kHeld & KEY_PLUS) sendto(s, "\x6\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x6\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //Left stick click
-        if (kHeld & KEY_LSTICK) sendto(s, "\x7\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x7\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        
-        //Right stick click
-        if (kHeld & KEY_RSTICK) sendto(s, "\x8\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x8\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //L Shoulder
-        if (kHeld & KEY_L) sendto(s, "\x9\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x9\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //R Shoulder
-        if (kHeld & KEY_R) sendto(s, "\xA\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\xA\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        
-        //Touchscreen touch (XBOX Button)
-        if (kHeld & KEY_TOUCH) sendto(s, "\xB\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\xB\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-		/* Pro Controller work around */
-		if (kHeld & KEY_R)
-		{
-			if (kHeld & KEY_LSTICK) sendto(s, "\xB\x1", 2, 0, (struct sockaddr *) &si_other, slen);
-			else sendto(s, "\xB\x0", 2, 0, (struct sockaddr *) &si_other, slen);
-		}
-
-        //A button
-        if (kHeld & KEY_A) sendto(s, "\xC\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\xC\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //B button
-        if (kHeld & KEY_B) sendto(s, "\xD\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\xD\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //X button
-        if (kHeld & KEY_X) sendto(s, "\xE\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\xE\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //Y Button
-        if (kHeld & KEY_Y) sendto(s, "\xF\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\xF\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //ZL Trigger
-        if (kHeld & KEY_ZL) sendto(s, "\x10\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x10\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
-
-        //ZR Trigger
-        if (kHeld & KEY_ZR) sendto(s, "\x11\x1", 2 , 0 , (struct sockaddr *) &si_other, slen);
-        else sendto(s, "\x11\x0", 2 , 0 , (struct sockaddr *) &si_other, slen);
+        HidAnalogStickState l_stick = padGetStickPos(&pad, 0);
+        HidAnalogStickState r_stick = padGetStickPos(&pad, 1);
 
         data[0] = 0x12;
-        data[1] = joystickLeft.dx >> 8;
-        data[2] = joystickLeft.dx & 0xFF;
-        data[3] = joystickLeft.dy >> 8;
-        data[4] = joystickLeft.dy & 0xFF;
-        sendto(s, data, 5 , 0 , (struct sockaddr *) &si_other, slen);
+        data[1] = l_stick.x >> 8; data[2] = l_stick.x & 0xFF;
+        data[3] = l_stick.y >> 8; data[4] = l_stick.y & 0xFF;
+        sendto(s, data, 5, 0, (struct sockaddr *) &si_other, slen);
 
         data[0] = 0x13;
-        data[1] = joystickRight.dx >> 8;
-        data[2] = joystickRight.dx & 0xFF;
-        data[3] = joystickRight.dy >> 8;
-        data[4] = joystickRight.dy & 0xFF;
-        sendto(s, data, 5 , 0 , (struct sockaddr *) &si_other, slen);
+        data[1] = r_stick.x >> 8; data[2] = r_stick.x & 0xFF;
+        data[3] = r_stick.y >> 8; data[4] = r_stick.y & 0xFF;
+        sendto(s, data, 5, 0, (struct sockaddr *) &si_other, slen);
 
         consoleUpdate(NULL);
-    }
+        }
 
+    close(s);
     consoleExit(NULL);
-
-	if (hosversionBefore(7, 0, 0))
-		pcvExit();
-	else
-		clkrstExit();
-
-	return 0;
+    return 0;
 }
