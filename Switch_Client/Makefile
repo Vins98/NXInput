@@ -30,9 +30,9 @@ include $(DEVKITPRO)/libnx/switch_rules
 #     - icon.jpg
 #     - <libnx folder>/default_icon.jpg
 #---------------------------------------------------------------------------------
-APP_TITLE := SwitchXBOXController
-APP_AUTHOR := WerWolv
-APP_VERSION := 1.0.0
+APP_TITLE := NXInput
+APP_AUTHOR := Vins98, WerWolv
+APP_VERSION := 2.0.0
 
 TARGET		:=	$(notdir $(CURDIR))
 BUILD		:=	build
