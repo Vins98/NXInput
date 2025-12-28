@@ -23,6 +23,7 @@ The client and the server will now be distributed as separate zip files, so keep
 ## Technical notes & Troubleshooting
 Before saying: 
 > This doesn't work!
+
 *This works. It just doesn't work the way you think it would (not yet). It's required to keep your Switch connected to the same network of your PC, as it will send controller data through UDP packets!*
 
 This application works by using a UDP socket between your Switch and your PC, transmitting your controller's data (defaults to the handheld/1st player's controller), so you could technically bridge a Switch Pro Controller connected to your Switch to your PC.
