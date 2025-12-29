@@ -6,18 +6,18 @@ Why this name change? Well, I didn't like the old name, and I think that NXInput
 As ScpDriverInterface is deprecated and can cause compatibility issues with Windows 11, this was migrated to yet another deprecated but much more recent driver ([ViGEmBus](https://github.com/nefarius/ViGEmBus)), as we currently don't have any better alternative, and many of us likely already have this installed for some other controller related software.
 The client and the server will now be distributed as separate zip files, so keep sure to download both of them.
 
-![Server](https://puu.sh/BVASI/d8c6c00ecc.png)
+<img width="419" height="244" alt="image" src="https://github.com/user-attachments/assets/7bb2449e-3ee5-44a5-8337-18d17607b48c" />
 
 ## How to use
 - Download the latest [ViGEmBus](https://github.com/nefarius/ViGEmBus) release and install it if you don't already have it.
 - Download the latest NXInput release and execute `NXInput_Server.exe`. You might have to allow network access in the firewall settings.
-- Put the SwitchXBOXController_Client.nro in your `/switch` folder on the SD Card of your Nintendo Switch.
+- Put the NXInput_Client.nro in your `/switch` folder on the SD Card of your Nintendo Switch.
 - Start the homebrew application using the hbmenu
 
 ## Roadmap
  1. ~~Upgrade client to libnx 4.10~~ ✅
- 2. (soon) Modify server to use ViGEmBus
- 3. (later) Add USB connection method (still using the Server)
+ 2. ~~Modify server to use ViGEmBus~~ ✅
+ 3. WIP - Add wired connection method (without UDP, but still using the Server to wrap to ViGEmBus, kinda like how DS4Windows works)
  4. TBD - Switch-side XInput USB emulation (no Server or drivers needed in this case, and would work with any XInput compatible device, even with an XBOX and Android Phones)
 
 ## Technical notes & Troubleshooting
