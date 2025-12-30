@@ -32,7 +32,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 #---------------------------------------------------------------------------------
 APP_TITLE := NXInput
 APP_AUTHOR := Vins98, WerWolv
-APP_VERSION := 2.0.0
+APP_VERSION := 1.0.0.0
 
 TARGET		:=	$(notdir $(CURDIR))
 BUILD		:=	build
