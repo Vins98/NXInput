@@ -10,8 +10,10 @@ The client and the server will now be distributed as separate zip files, so keep
 
 ## How to use
 - Download the latest [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest) release and install it if you don't already have it.
-- Download the latest NXInput release and execute `NXInput_Server.exe`. You might have to allow network access in the firewall settings.
-- Put the NXInput_Client.nro in your `/switch` folder on the SD Card of your Nintendo Switch.
+- Download the latest [NXInput_Server.zip](https://github.com/Vins98/NXInput/releases/latest/download/NXInput_Server.zip) release, extract it and execute `NXInput_Server.exe`. You might have to allow network access in the firewall settings.
+- For the client you have two options:
+    - Download NXInput using HB AppStore or Sphaira 
+    - Download the latest [NXInput_Client.nro](https://github.com/Vins98/NXInput/releases/latest/download/NXInput_Client.nro) release, and copy it in your `/switch` folder on your Switch SD Card.
 - Start the homebrew application using the hbmenu
 
 ## Roadmap
