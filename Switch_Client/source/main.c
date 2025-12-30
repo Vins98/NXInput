@@ -249,6 +249,7 @@ int main(int argc, char* argv[]) {
         consoleUpdate(NULL);
         }
 
+    socketExit();
     close(s);
     consoleExit(NULL);
     return 0;
