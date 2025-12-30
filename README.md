@@ -1,4 +1,6 @@
 # NXInput (formerly SwitchXBOXController)
+<img width="848" height="208" alt="NXinput Banner" src="https://github.com/user-attachments/assets/8a54cd10-e36e-4942-a4ce-81c0f5ab1c97" />
+
 Turn your Nintendo Switch into an Xinput wireless controller for your Windows computer!
 
 Based on [WerWolv](https://github.com/WerWolv)'s great work, now working to the latest Switch's FW (ATTOW 21.1.0) by upgrading to libnx 4.10.
@@ -6,6 +8,7 @@ Why this name change? Well, I didn't like the old name, and I think that NXInput
 As ScpDriverInterface is deprecated and can cause compatibility issues with Windows 11, this was migrated to yet another deprecated but much more recent driver ([ViGEmBus](https://github.com/nefarius/ViGEmBus)), as we currently don't have any better alternative, and many of us likely already have this installed for some other controller related software.
 The client and the server will now be distributed as separate zip files, so keep sure to download both of them.
 
+<img width="500" height="281" alt="0000000000000000_2025-12-30_12-43-51-409" src="https://github.com/user-attachments/assets/eedbfe5b-c8d1-4bc1-9507-b9387466e3b6" />
 <img width="419" height="244" alt="image" src="https://github.com/user-attachments/assets/7bb2449e-3ee5-44a5-8337-18d17607b48c" />
 
 ## How to use
