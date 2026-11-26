@@ -1,4 +1,6 @@
-﻿using System;
+using System;
+using System.Diagnostics;
+using System.Drawing;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -18,9 +20,10 @@ namespace NXInput_Server
         public static IXbox360Controller controller;
         private static Thread networkThread;
         private static UdpClient udpSocket;
-        private static bool running = false;
-        private static bool switchConnected = false;
-        private static IPEndPoint clientEndPoint;
+        private static volatile bool running;
+        private volatile bool rumbleConnected;
+        private int gameRumble;
+        private long testRumbleUntil;
 
         private bool _serverRunning;
 
@@ -28,6 +31,31 @@ namespace NXInput_Server
         public Form1()
         {
             InitializeComponent();
+            var testButton = new Button
+            {
+                Text = "Test Rumble",
+                Location = new Point(226, 9),
+                Size = new Size(92, 23)
+            };
+            testButton.Click += (sender, args) => TestRumble();
+            Controls.Add(testButton);
+            FormClosing += (sender, args) => StopServer();
+        }
+
+        private void TestRumble()
+        {
+            if (!rumbleConnected)
+            {
+                Log("Connect a rumble-capable NXInput client first.");
+                return;
+            }
+            Interlocked.Exchange(ref testRumbleUntil, Stopwatch.GetTimestamp() + Stopwatch.Frequency / 2);
+            Log("Sending a half-second rumble test.");
+        }
+
+        private void ControllerFeedback(object sender, Xbox360FeedbackReceivedEventArgs args)
+        {
+            Volatile.Write(ref gameRumble, args.LargeMotor | (args.SmallMotor << 8));
         }
 
         private void Form1_Load(object sender, EventArgs e)
@@ -69,13 +97,16 @@ namespace NXInput_Server
             {
                 button1.Enabled = false;
 
+                udpSocket = new UdpClient(new IPEndPoint(IPAddress.Any, 8192));
+                udpSocket.Client.ReceiveTimeout = 20;
                 vigemClient = new ViGEmClient();
                 controller = vigemClient.CreateXbox360Controller();
+                controller.FeedbackReceived += ControllerFeedback;
                 controller.Connect();
                 Log("Virtual controller created.");
 
                 running = true;
-                switchConnected = false;
+                rumbleConnected = false;
 
                 networkThread = new Thread(networking);
                 networkThread.Start();
@@ -96,16 +127,21 @@ namespace NXInput_Server
 
         private void StopServer()
         {
-            if (!_serverRunning) return;
+            if (!_serverRunning && udpSocket == null && vigemClient == null) return;
 
             try
             {
                 running = false;
-                switchConnected = false;
+                rumbleConnected = false;
 
                 udpSocket?.Close();
                 networkThread?.Join(1000);
+                udpSocket = null;
+                networkThread = null;
 
+                if (controller != null) controller.FeedbackReceived -= ControllerFeedback;
+                Volatile.Write(ref gameRumble, 0);
+                Interlocked.Exchange(ref testRumbleUntil, 0);
                 controller?.Disconnect();
                 vigemClient?.Dispose();
                 controller = null;
@@ -127,63 +163,67 @@ namespace NXInput_Server
 
         private void networking()
         {
-            byte[] data = new byte[1024];
-            var ipep = new IPEndPoint(IPAddress.Any, 8192);
-
             try
             {
-                udpSocket = new UdpClient(ipep);
                 var sender = new IPEndPoint(IPAddress.Any, 0);
+                IPEndPoint clientEndPoint = null;
+                long lastInputAt = 0;
+                long nextRumbleAt = 0;
+                var rumblePacket = new byte[] { 0x4E, 0x58, 0x52, 0, 0 };
 
                 Log("Waiting for Switch discovery...");
-
-                while (!switchConnected && running)
-                {
-                    try
-                    {
-                        data = udpSocket.Receive(ref sender);
-                        string msg = Encoding.ASCII.GetString(data).Trim();
-
-                        if (msg.Contains("xbox_switch"))
-                        {
-                            udpSocket.Send(Encoding.ASCII.GetBytes("xbox\0"), Encoding.ASCII.GetBytes("xbox\0").Length, sender);
-                            clientEndPoint = (IPEndPoint)sender;
-                            switchConnected = true;
-                            Log($"Connected to: {clientEndPoint.Address}");
-                            break;
-                        }
-                    }
-                    catch {}
-                }
-
-                if (!switchConnected)
-                {
-                    Log("Switch discovery failed");
-                    return;
-                }
-
-                Log("Running...");
 
                 while (running)
                 {
                     try
                     {
-                        data = udpSocket.Receive(ref sender);
+                        long now = Stopwatch.GetTimestamp();
+                        if (clientEndPoint != null && now - lastInputAt > Stopwatch.Frequency * 2)
+                        {
+                            clientEndPoint = null;
+                            rumbleConnected = false;
+                            ResetController();
+                            Log("Switch disconnected. Waiting for discovery...");
+                        }
+                        if (rumbleConnected && now >= nextRumbleAt)
+                        {
+                            bool testing = now < Interlocked.Read(ref testRumbleUntil);
+                            int intensity = testing ? 0x7FC8 : Volatile.Read(ref gameRumble);
+                            rumblePacket[3] = (byte)(intensity & 0xff);
+                            rumblePacket[4] = (byte)(intensity >> 8);
+                            udpSocket.Send(rumblePacket, rumblePacket.Length, clientEndPoint);
+                            nextRumbleAt = now + Stopwatch.Frequency / 20;
+                        }
+                        byte[] data = udpSocket.Receive(ref sender);
+                        if (data.Length > 5 && (clientEndPoint == null || clientEndPoint.Address.Equals(sender.Address)))
+                        {
+                            string hello = Encoding.ASCII.GetString(data).TrimEnd('\0');
+                            if (hello != "xbox_switch" && hello != "xbox_switch_rumble") continue;
 
-                        if (data.Length < 2) continue;
+                            bool supportsRumble = hello == "xbox_switch_rumble";
+                            byte[] reply = Encoding.ASCII.GetBytes(supportsRumble ? "xbox_rumble\0" : "xbox\0");
+                            udpSocket.Send(reply, reply.Length, sender);
+                            if (!sender.Equals(clientEndPoint))
+                            {
+                                ResetController();
+                                Log($"Connected to: {sender.Address} (rumble: {supportsRumble})");
+                            }
+                            clientEndPoint = sender;
+                            lastInputAt = Stopwatch.GetTimestamp();
+                            rumbleConnected = supportsRumble;
+                            nextRumbleAt = 0;
+                            continue;
+                        }
+                        if (data.Length < 2 || !sender.Equals(clientEndPoint)) continue;
+                        lastInputAt = Stopwatch.GetTimestamp();
 
                         byte code = data[0];
                         byte v1 = data[1];
 
-                        if (code <= 0x0B)
+                        if (code <= 0x0F)
                         {
                             var btn = MapCodeToXboxButton(code);
-                            controller.SetButtonState(btn, v1 != 0);
-                        }
-                        else if (code <= 0x0F)
-                        {
-                            var btn = MapCodeToXboxButton(code);
-                            controller.SetButtonState(btn, v1 != 0);
+                            if (btn != null) controller.SetButtonState(btn, v1 != 0);
                         }
                         else if (code == 0x10) // ZL
                         {
@@ -193,14 +233,14 @@ namespace NXInput_Server
                         {
                             controller.SetSliderValue(Xbox360Slider.RightTrigger, v1 == 0 ? (byte)0x00 : (byte)0xFF);
                         }
-                        else if (code == 0x12) // Left stick
+                        else if (code == 0x12 && data.Length == 5) // Left stick
                         {
                             short lx = (short)((data[1] << 8) | data[2]);
                             short ly = (short)((data[3] << 8) | data[4]);
                             controller.SetAxisValue(Xbox360Axis.LeftThumbX, lx);
                             controller.SetAxisValue(Xbox360Axis.LeftThumbY, ly);
                         }
-                        else if (code == 0x13) // Right stick
+                        else if (code == 0x13 && data.Length == 5) // Right stick
                         {
                             short rx = (short)((data[1] << 8) | data[2]);
                             short ry = (short)((data[3] << 8) | data[4]);
@@ -208,18 +248,23 @@ namespace NXInput_Server
                             controller.SetAxisValue(Xbox360Axis.RightThumbY, ry);
                         }
                     }
-                    catch (SocketException) { break; }
-                    catch { /* ignore bad packets */ }
+                    catch (SocketException ex) when (ex.SocketErrorCode == SocketError.TimedOut ||
+                        ex.SocketErrorCode == SocketError.ConnectionReset) { }
                 }
             }
             catch (Exception ex)
             {
-                Log("Networking error: " + ex.Message);
+                if (running) Log("Networking error: " + ex.Message);
             }
         }
 
-
-
+        private void ResetController()
+        {
+            controller.ResetReport();
+            controller.SubmitReport();
+            Volatile.Write(ref gameRumble, 0);
+            Interlocked.Exchange(ref testRumbleUntil, 0);
+        }
 
         private static Xbox360Button MapCodeToXboxButton(byte code)
         {

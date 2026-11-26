@@ -13,10 +13,23 @@
 
 #define PORT 8192
 #define CPU_CLOCK 204E6 //204MHz is the sweet spot between latency and battery life, still can be overriden by using sys-clk
+#define RUMBLE_TIMEOUT_NS 300000000ULL
 
 char ipAddress[16];
 u8 data[5];
 PadState pad;
+static bool rumbleConnected;
+
+static Result setRumble(const HidVibrationDeviceHandle *handles, int count, u8 low, u8 high) {
+    HidVibrationValue value = {
+        .amp_low = low / 255.0f,
+        .freq_low = 160.0f,
+        .amp_high = high / 255.0f,
+        .freq_high = 320.0f
+    };
+    HidVibrationValue values[2] = {value, value};
+    return hidSendVibrationValues(handles, values, count);
+}
 
 void * get_in_addr(struct sockaddr *sa) {
     if (sa->sa_family == AF_INET) {
@@ -26,7 +39,7 @@ void * get_in_addr(struct sockaddr *sa) {
 }
 
 int broadcast(int sck, char * host, char * port) {
-    uint8_t msg[] = "xbox_switch";
+    uint8_t msg[] = "xbox_switch_rumble";
     char buffer[128] = {0};
     struct hostent * he;
     struct sockaddr_in remote;
@@ -85,7 +98,8 @@ int broadcast(int sck, char * host, char * port) {
 
         if (len > 0) {
             buffer[len] = '\0';
-            if (strcmp("xbox", buffer) == 0) {
+            if (strcmp("xbox", buffer) == 0 || strcmp("xbox_rumble", buffer) == 0) {
+                rumbleConnected = strcmp("xbox_rumble", buffer) == 0;
                 char addr[40] = {0};
                 const char * ptr = inet_ntop(from.ss_family, get_in_addr((struct sockaddr *)&from), addr, sizeof(addr));
                 strcpy(ipAddress, ptr);
@@ -108,7 +122,8 @@ void updateButtonState(int s, struct sockaddr_in *si_other, int slen, u64 kHeld,
 int main(int argc, char* argv[]) {
     u8 currentIpBlock = 0;
     u8 ipBlocks [4] = {192, 168 , 1, 255};
-    int s = -1; 
+    int s = -1;
+    bool connected = false;
 
     socketInitializeDefault();
     consoleInit(NULL);
@@ -175,6 +190,7 @@ int main(int argc, char* argv[]) {
 
             consoleUpdate(NULL);
         }
+        if (!appletMainLoop()) break;
 
         // Prepare for broadcast
         char computersIp[16];
@@ -188,16 +204,23 @@ int main(int argc, char* argv[]) {
         }
 
         if (broadcast(s, computersIp, "8192") == 0) {
+            connected = true;
             break; // Connection successful!
         } else {
-            close(s); 
+            close(s);
+            s = -1;
         }
     }
 
+    if (!connected) {
+        socketExit();
+        consoleExit(NULL);
+        return 0;
+    }
+
     printf("\x1b[13;1HConnected to: %s", ipAddress);
-    printf("\x1b[14;1Press + and - to Exit.");
-    printf("\x1b[15;1H");
-    printf("   \x1b[K");
+    printf("\x1b[14;1HPress + and - to Exit.\x1b[K");
+    printf("\x1b[15;1HRumble link: %s\x1b[K", rumbleConnected ? "enabled" : "legacy server");
     
     consoleUpdate(NULL);
 
@@ -207,6 +230,11 @@ int main(int argc, char* argv[]) {
     si_other.sin_family = AF_INET;
     si_other.sin_port = htons(PORT);
     inet_aton(ipAddress, &si_other.sin_addr);
+
+    HidVibrationDeviceHandle handles[2];
+    int handleCount = 0;
+    u64 lastRumbleAt = 0;
+    u8 activeLow = 0, activeHigh = 0;
     
     while (appletMainLoop()) {
         padUpdate(&pad);
@@ -215,6 +243,57 @@ int main(int argc, char* argv[]) {
         u64 kUp = padGetButtonsUp(&pad);
 
         if ((kHeld & HidNpadButton_Plus) && (kHeld & HidNpadButton_Minus)) break;
+
+        if (rumbleConnected) {
+            if (handleCount == 0) {
+                u32 style = padGetStyleSet(&pad);
+                HidNpadIdType id = HidNpadIdType_No1;
+                HidNpadStyleTag tag = HidNpadStyleTag_NpadFullKey;
+                int count = 1;
+                if (style & HidNpadStyleTag_NpadHandheld) {
+                    id = HidNpadIdType_Handheld;
+                    tag = HidNpadStyleTag_NpadHandheld;
+                    count = 2;
+                } else if (style & HidNpadStyleTag_NpadJoyDual) {
+                    tag = HidNpadStyleTag_NpadJoyDual;
+                    count = 2;
+                }
+                if (style && R_SUCCEEDED(hidInitializeVibrationDevices(handles, count, id, tag))) {
+                    handleCount = count;
+                    printf("\x1b[16;1HVibration devices: %d\x1b[K", handleCount);
+                }
+            }
+            u8 packet[8];
+            struct sockaddr_in sender;
+            bool received = false;
+            u8 low = 0, high = 0;
+            for (int i = 0; i < 16; i++) {
+                socklen_t senderLen = sizeof(sender);
+                ssize_t size = recvfrom(s, packet, sizeof(packet), MSG_DONTWAIT,
+                    (struct sockaddr *)&sender, &senderLen);
+                if (size < 0) break;
+                if (size == 5 && sender.sin_port == si_other.sin_port &&
+                    sender.sin_addr.s_addr == si_other.sin_addr.s_addr &&
+                    memcmp(packet, "NXR", 3) == 0) {
+                    received = true;
+                    low = packet[3];
+                    high = packet[4];
+                    lastRumbleAt = armGetSystemTick();
+                }
+            }
+            if (!received && (activeLow || activeHigh) &&
+                armTicksToNs(armGetSystemTick() - lastRumbleAt) >= RUMBLE_TIMEOUT_NS) {
+                received = true;
+            }
+            if (received && handleCount && (low != activeLow || high != activeHigh)) {
+                Result rc = setRumble(handles, handleCount, low, high);
+                if (R_SUCCEEDED(rc)) {
+                    activeLow = low;
+                    activeHigh = high;
+                }
+                printf("\x1b[17;1HRumble low:%3u high:%3u result:%08X\x1b[K", low, high, rc);
+            }
+        }
 
         updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Up, "\x1");
         updateButtonState(s, &si_other, slen, kHeld, kDown, kUp, HidNpadButton_Down, "\x2");
@@ -249,8 +328,9 @@ int main(int argc, char* argv[]) {
         consoleUpdate(NULL);
         }
 
-    socketExit();
+    if (handleCount) setRumble(handles, handleCount, 0, 0);
     close(s);
+    socketExit();
     consoleExit(NULL);
     return 0;
 }
