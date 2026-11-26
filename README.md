@@ -19,6 +19,14 @@ The client and the server will now be distributed as separate zip files, so keep
     - Download the latest [NXInput_Client.nro](https://github.com/Vins98/NXInput/releases/latest/download/NXInput_Client.nro) release, and copy it in your `/switch` folder on your Switch SD Card.
 - Start the homebrew application using the hbmenu
 
+### Controller rumble
+
+Use the updated Windows server and Switch client together to forward XInput
+rumble to the Switch. Once connected, click **Test Rumble** in the server to
+send a half-second pulse. Enable controller vibration in the Switch system
+settings and in the game. When either side uses an older version, buttons
+and sticks still work without rumble.
+
 ## Roadmap
  1. ~~Upgrade client to libnx 4.10~~ ✅
  2. ~~Modify server to use ViGEmBus~~ ✅
